@@ -1,0 +1,12 @@
+---
+api:
+  token: <put your token here>
+  port: 4440
+  action: /api/10/incubator/jobs/takeoverSchedule
+servers:
+  node-1:
+    uuid: <get Rundeck UUID from your Server>
+    takeover: node-2
+  node-2:
+    uuid: <get Rundeck UUID from your Server>
+    takeover: node-1 

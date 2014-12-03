@@ -1,0 +1,76 @@
+#!/usr/bin/perl -w
+
+# check haproxy state for rundeck cluster nodes
+# on failure trigger a takover for jobs
+# this script is DUMB and conditions should be dropped in for targeted takeovers
+# whenever a node is down it will continually fire a takeover it's pair until both servers
+# are back up.  This is sufficient to start but not effecient nor complete.
+# quick and dirty daemon using Proc::Daemon.  I love you Perl!
+
+use strict;
+use warnings;
+use IO::Socket::UNIX;
+use HTTP::Request::Common;
+use LWP;
+use YAML;
+use Proc::Daemon;
+
+my $daemon = Proc::Daemon->new(
+    work_dir     => '/var/lib/rundeck',
+    child_STDOUT => '/var/log/rundeck-healthcheck.log',
+    child_STDERR => '/var/log/rundeck-healthcheck.log',
+    pid_file     => '/var/run/rundeck-healthcheck.pid',
+    setuid       => 'rundeck',
+);
+
+# begin the child process 
+$daemon->Init;
+
+# tell the other node(s) to take over the schedules from the failed server/service
+sub takeover {
+    my ($yaml, $takeover_host) = @_; 
+    my $ua = LWP::UserAgent->new; 
+    $ua->agent('RundeckFailoverAgent/0.1');
+    my $port  = $yaml->{api}->{port};
+    my $token = $yaml->{api}->{token};
+    my $uri   = $yaml->{api}->{action};
+    my $uuid  = $yaml->{servers}->{$takeover_host}->{uuid};
+    my $xml   = "<server uuid='${uuid}'/>";
+    my $url   = "http://${takeover_host}:${port}${uri}";
+    my $data  = "<server uuid=\"${uuid}\"/>";
+
+    my $request = HTTP::Request::Common::PUT($url, X_Rundeck_Auth_Token => ${token}, Content_Type => 'application/xml', Content => $data);
+    my $response = $ua->request($request);
+
+    1;
+}
+
+while (1) {
+    my %server_stats = ();
+    my $sock = new IO::Socket::UNIX (Type => SOCK_STREAM, Peer => '/var/run/haproxy/haproxy.sock', Timeout => 1);
+    my $config = YAML::LoadFile('/etc/rundeck.yml');
+
+    print $sock "show stat\n";
+
+    # no need to double
+    while (my $line = <$sock>) {
+        if ($line =~ /es-centos-rundeck-[\d+]/) {
+            chomp($line);
+            my @stats = split(',',$line);
+            $server_stats{$stats[1]} = $stats[17];
+        }
+    }
+
+    for my $server (keys %server_stats) {
+        if ($server_stats{$server} ne 'UP') {
+            printf "%s is down: having %s takeover jobs\n", $server, $config->{servers}->{$server}->{takeover};
+            takeover($config, $config->{servers}->{$server}->{takeover});
+        }
+    }
+
+    #print Dumper(%server_stats);
+    $sock->close;
+    sleep(15);
+}
+
+exit 0;
